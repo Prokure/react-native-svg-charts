@@ -4,7 +4,7 @@ import * as shape from 'd3-shape'
 import PropTypes from 'prop-types'
 import React, { PureComponent } from 'react'
 import { View } from 'react-native'
-import Svg from 'react-native-svg'
+import Svg, { Defs, G } from 'react-native-svg'
 import Path from '../animated-path'
 import Grid from '../grid'
 
@@ -20,179 +20,168 @@ class BarChart extends PureComponent {
         this.setState({ height, width })
     }
 
-    calcXScale(domain) {
-        const {
-            horizontal,
-            contentInset: {
-                left = 0,
-                right = 0,
-            },
-            spacingInner,
-            spacingOuter,
-        } = this.props
-
-        const { width } = this.state
-
-        if (horizontal) {
-            return scale.scaleLinear()
-                .domain(domain)
-                .range([ left, width - right ])
-        }
-
-        return scale.scaleBand()
-            .domain(domain)
-            .range([ left, width - right ])
-            .paddingInner([ spacingInner ])
-            .paddingOuter([ spacingOuter ])
-    }
-
-    calcYScale(domain) {
-        const {
-            horizontal,
-            contentInset: {
-                top = 0,
-                bottom = 0,
-            },
-            spacingInner,
-            spacingOuter,
-        } = this.props
-
-        const { height } = this.state
-
-        if (horizontal) {
-            return scale.scaleBand()
-                .domain(domain)
-                .range([ top, height - bottom ])
-                .paddingInner([ spacingInner ])
-                .paddingOuter([ spacingOuter ])
-        }
-
-        return scale.scaleLinear()
-            .domain(domain)
-            .range([ height - bottom, top ])
-    }
-
-    calcAreas(x, y) {
-        const { horizontal, data, yAccessor } = this.props
-
-        const values = data.map(item => yAccessor({ item }))
-
-        if (horizontal) {
-            return data.map((bar, index) => ({
-                bar,
-                path: shape.area()
-                    .y((value, _index) => _index === 0 ?
-                        y(index) :
-                        y(index) + y.bandwidth())
-                    .x0(x(0))
-                    .x1(value => x(value))
-                    .defined(value => typeof value === 'number')
-                    ([ values[ index ], values[ index ] ]),
-            }))
-        }
-
-        return data.map((bar, index) => ({
-            bar,
-            path: shape.area()
+    _getBar(value, x, y, barIndex, valueIndex, barWidth) {
+        return {
+            value,
+            area: shape.area()
+                // place the bar on the x-axis based on valueIndex + its index among the other bars in its group
+                .x((point, _index) =>
+                    _index === 0 ?
+                        x(valueIndex) + (barWidth * barIndex) :
+                        x(valueIndex) + barWidth + (barWidth * barIndex),
+            )
                 .y0(y(0))
-                .y1(value => y(value))
-                .x((value, _index) => _index === 0 ?
-                    x(index) :
-                    x(index) + x.bandwidth())
-                .defined(value => typeof value === 'number')
-                ([ values[ index ], values[ index ] ]),
-        }))
-    }
-
-    calcExtent() {
-        const { data, gridMin, gridMax, yAccessor } = this.props
-        const values = data.map(obj => yAccessor({ item: obj }))
-
-        return array.extent([ ...values, gridMax, gridMin ])
-    }
-
-    calcIndexes() {
-        const { data } = this.props
-        return data.map((_, index) => index)
+                .y1(point => y(point))
+                .defined(value => value)
+                ([value, value]),
+        }
     }
 
     render() {
         const {
-            data,
+                  data,
+            dataPoints,
+            spacing,
             animate,
             animationDuration,
             style,
             showGrid,
+            renderGradient,
             numberOfTicks,
+            contentInset: {
+                      top = 0,
+                bottom = 0,
+                left = 0,
+                right = 0,
+                  },
+            gridMax,
+            gridMin,
             gridProps,
             extras,
+            renderExtra,
             renderDecorator,
-            renderGrid = Grid,
-            svg,
-            horizontal,
-        } = this.props
+              } = this.props
+
+        if (!data && dataPoints) {
+            throw `"dataPoints" have been renamed to "data" to better reflect the fact that it's an array of  objects`
+        }
 
         const { height, width } = this.state
 
-        if (data.length === 0) {
-            return <View style={ style }/>
+        if (data.length === 0 || data[0].values.length === 0) {
+            return <View style={style} />
         }
 
-        const extent = this.calcExtent()
-        const indexes = this.calcIndexes()
-        const ticks = array.ticks(extent[ 0 ], extent[ 1 ], numberOfTicks)
+        if (data.length > 0 && typeof data[0] === 'object') {
+            const lengths = Object.values(data).map(obj => obj.values.length)
+            const extent = array.extent(lengths)
+            if (extent[0] - extent[1] !== 0) {
+                throw new Error(`value arrays must be of equal length. Lengths are [${lengths}]`)
+            }
+        }
 
-        const xDomain = horizontal ? extent : indexes
-        const yDomain = horizontal ? indexes : extent
+        const values = array.merge(Object.values(data).map(obj => obj.values))
 
-        const x = this.calcXScale(xDomain)
-        const y = this.calcYScale(yDomain)
+        const extent = array.extent([...values, gridMax, gridMin])
+        const ticks = array.ticks(extent[0], extent[1], numberOfTicks)
 
-        const bandwidth = horizontal ? y.bandwidth() : x.bandwidth()
+        //invert range to support svg coordinate system
+        const y = scale.scaleLinear()
+            .domain(extent)
+            .range([height - bottom, top])
 
-        const areas = this.calcAreas(x, y)
-            .filter(area => (
-                area.bar !== null &&
-            area.bar !== undefined &&
-            area.path !== null
-            ))
+        // use index as domain identifier instead of value since
+        // same value can occur at several places in data
+        const x = scale.scaleBand()
+            .domain(data[0].values.map((_, index) => index))
+            .range([left, width - right])
+            .paddingInner([spacing])
+            .paddingOuter([spacing])
+
+        const numberOfDifferentBars = Object.keys(data).length
+        const barWidth = x.bandwidth() / numberOfDifferentBars
+        const dataLength = data[0].values.length
+
+        let areas = []
+        for (let i = 0; i < dataLength; i++) {
+
+            //pick up the value from each "bar collection"
+            const currentValues = Object.values(data)
+                .map(obj => obj.values[i])
+
+            //for each value calculate the bar area. The object index plays a big role
+            currentValues.forEach((value, barIndex) => {
+
+                // eslint-disable-next-line no-unused-vars
+                const { values, positive, negative, ...other } = data[barIndex]
+
+                const bar = this._getBar(value, x, y, barIndex, i, barWidth)
+
+                areas.push({
+                    ...bar,
+                    positive,
+                    negative,
+                    ...other,
+                })
+            })
+        }
 
         return (
-            <View style={ style }>
+            <View style={style}>
                 <View
                     style={{ flex: 1 }}
-                    onLayout={ event => this._onLayout(event) }
+                    onLayout={event => this._onLayout(event)}
                 >
                     <Svg style={{ flex: 1 }}>
-                        {showGrid && renderGrid({ x, y, ticks, data, gridProps })}
                         {
-                            areas.map((area, index) => {
+                            showGrid &&
+                            <Grid
+                                y={y}
+                                ticks={ticks}
+                                gridProps={gridProps}
+                            />
+                        }
+                        {
+                            areas.map((bar, index) => {
+                                if (!bar.area) {
+                                    return null
+                                }
 
-                                const { bar: { svg: barSvg = {} }, path } = area
+                                const props = bar.value < 0 ? bar.negative : bar.positive
 
                                 return (
-                                    <Path
-                                        key={ index }
-                                        { ...svg }
-                                        { ...barSvg }
-                                        d={ path }
-                                        animate={ animate }
-                                        animationDuration={ animationDuration }
-                                    />
+                                    <G key={index}>
+                                        <Defs>
+                                            {
+                                                renderGradient && renderGradient({
+                                                    id: `gradient-${index}`,
+                                                    ...props,
+                                                    value: bar.value,
+                                                })
+                                            }
+                                        </Defs>
+                                        <Path
+                                            { ...props }
+                                            fill={renderGradient ? `url(#gradient-${index})` : props.fill}
+                                            d={bar.area || null}
+                                            animate={animate}
+                                            animationDuration={animationDuration}
+                                        />
+                                    </G>
                                 )
                             })
                         }
 
-                        {data.map((item, index) => renderDecorator(
+                        {data[0].values.map((value, index) => renderDecorator(
                             {
-                                item,
+                                value,
                                 x,
                                 y,
                                 index,
-                                bandwidth,
+                                bandwidth: x.bandwidth(),
                             }
                         ))}
-                        {extras.map((extra, index) => extra({ item: extra, x, y, index, width, height }))}
+                        {extras.map((item, index) => renderExtra({ item, x, y, index, width, height }))}
                     </Svg>
                 </View>
             </View>
@@ -201,13 +190,16 @@ class BarChart extends PureComponent {
 }
 
 BarChart.propTypes = {
-    data: PropTypes.arrayOf(PropTypes.oneOfType([
-        PropTypes.number,
-        PropTypes.object,
-    ])).isRequired,
+    data: PropTypes.arrayOf(PropTypes.shape({
+        fillColor: PropTypes.string,
+        strokeColor: PropTypes.string,
+        strokeColorNegative: PropTypes.string,
+        fillColorNegative: PropTypes.string,
+        values: PropTypes.arrayOf(PropTypes.number).isRequired,
+    })).isRequired,
     style: PropTypes.any,
-    spacingInner: PropTypes.number,
-    spacingOuter: PropTypes.number,
+    renderGradient: PropTypes.func,
+    spacing: PropTypes.number,
     animate: PropTypes.bool,
     animationDuration: PropTypes.number,
     contentInset: PropTypes.shape({
@@ -222,22 +214,24 @@ BarChart.propTypes = {
     gridMax: PropTypes.number,
     gridProps: PropTypes.object,
     extras: PropTypes.array,
+    renderExtra: PropTypes.func,
     renderDecorator: PropTypes.func,
-    renderGrid: PropTypes.func,
-    svg: PropTypes.object,
 }
 
 BarChart.defaultProps = {
-    spacingInner: 0.05,
-    spacingOuter: 0.05,
+    spacing: 0.05,
+    width: 100,
+    height: 100,
     contentInset: {},
     numberOfTicks: 10,
     showGrid: true,
+    gridMin: 0,
+    gridMax: 0,
     extras: [],
-    svg: {},
     renderDecorator: () => {
     },
-    yAccessor: ({ item }) => item,
+    renderExtra: () => {
+    },
 }
 
 export default BarChart
